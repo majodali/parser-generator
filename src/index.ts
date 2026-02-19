@@ -29,7 +29,7 @@ export type { TextLocation } from './SyntaxTreeNode.js';
 export { parseGrammar, DSLError, stripComment, compileEvaluate } from './GrammarDSL.js';
 export type { ParseGrammarOptions } from './GrammarDSL.js';
 
-export { parseGrammarBootstrapped, getDSLGrammarSource } from './GrammarDSLBootstrapped.js';
+export { parseGrammarBootstrapped, getDSLGrammarSource, compileGrammarDSL } from './GrammarDSLBootstrapped.js';
 
 export { parse } from './Parser.js';
 export type { ParseOptions, ParseError, ParseResult } from './Parser.js';

@@ -221,29 +221,21 @@ export function getDSLGrammarSource(): string {
   return DSL_GRAMMAR_SOURCE;
 }
 
-export async function parseGrammarBootstrapped(
+export async function compileGrammarDSL(
   source: string,
-  options?: ParseGrammarOptions,
-): Promise<Grammar> {
-  // Stage 1: Preprocess — strip comments, blank lines, insert indent markers
+  grammar: Grammar,
+): Promise<{ grammar: Grammar; tree: SyntaxTreeNode }> {
   const preprocessed = preprocessSource(source);
-
-  // Stage 2: Parse with full DSL grammar (two-phase bootstrapped)
-  const fullGrammar = await getFullDSLGrammar();
-  const result = parse(fullGrammar, preprocessed);
+  const result = parse(grammar, preprocessed);
   if (result.errors.length > 0) {
     const err = result.errors[0];
     throw new DSLError(err.message, err.start.line);
   }
-
-  // Stage 3: The finalize on GrammarDef sets tree.compiled with the Grammar,
-  // eval specs, and definitions code. Wire up eval blocks if present.
   const compiled = (result.tree as any).compiled as {
     grammar: Grammar;
     evalSpecs: EvalBlockSpec[];
     definitionsCode: string | null;
   };
-
   if (compiled.evalSpecs.length > 0) {
     const moduleCode = generateModuleCode(compiled.definitionsCode, compiled.evalSpecs);
     const moduleExports = await loadModule(moduleCode);
@@ -251,8 +243,16 @@ export async function parseGrammarBootstrapped(
       wireEvalBlock(spec, moduleExports);
     }
   }
+  return { grammar: compiled.grammar, tree: result.tree };
+}
 
-  return compiled.grammar;
+export async function parseGrammarBootstrapped(
+  source: string,
+  options?: ParseGrammarOptions,
+): Promise<Grammar> {
+  const fullGrammar = await getFullDSLGrammar();
+  const { grammar } = await compileGrammarDSL(source, fullGrammar);
+  return grammar;
 }
 
 // ---------------------------------------------------------------------------
@@ -847,7 +847,7 @@ function resolvePhraseElement(
 ): GrammarElement {
   // node = PhraseElement Disjunction unwrapped → matched Phrase
   const children = node.children;
-  const firstText = children[0].text.trim();
+  const firstText = children[0].text;
 
   if (firstText === '{') {
     // '{' PhraseElement RepeatSuffix? '}' '+'?
@@ -866,12 +866,10 @@ function resolvePhraseElement(
 
   // Atom Modifier?
   // children[0] = Atom (Disjunction unwrapped → Phrase wrapping a terminal)
-  //   The Phrase's .text can include trailing whitespace (from input span),
-  //   so we extract the terminal's clean text from children[0].children[0].
   // children[1] = Optional(Modifier)
   const atomNode = children[0];
   const atomText = atomNode.children.length > 0 ? atomNode.children[0].text : atomNode.text;
-  const modifier = optText(children[1])?.trim() ?? null;
+  const modifier = optText(children[1]);
   const element = resolveAtomicRef(grammar, atomText, node.start.line);
 
   if (modifier === '?') return grammar.optional(element);
@@ -1012,7 +1010,7 @@ function processGroup(
     );
   }
 
-  const modifier = optText(children[3])?.trim() ?? null;
+  const modifier = optText(children[3]);
   if (modifier === '*') return grammar.repeat(resolved, { min: 0 });
   if (modifier === '+') return grammar.repeat(resolved, { min: 1 });
   if (modifier === '?') return grammar.optional(resolved);

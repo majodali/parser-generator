@@ -747,7 +747,12 @@ class EarleyParser {
     }
 
     const startOffset = this.positions[start] ?? 0;
-    const endOffset = this.positions[end] ?? this.input.length;
+    // Derive endOffset from the last child's actual end position so that
+    // non-terminal node text doesn't include trailing inter-token whitespace.
+    // Terminal children already have exact text, so this cascades correctly.
+    const endOffset = children.length > 0
+      ? children[children.length - 1].end.index
+      : (this.positions[end] ?? this.input.length);
     const text = this.input.slice(startOffset, endOffset);
     const startLoc = this.locationFromOffset(startOffset);
     const endLoc = this.locationFromOffset(endOffset);

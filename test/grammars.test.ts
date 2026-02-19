@@ -4,8 +4,10 @@ import { resolve } from 'path';
 import {
   parseGrammarBootstrapped,
   getDSLGrammarSource,
+  compileGrammarDSL,
   Grammar,
   parse,
+  SyntaxTreeNode,
 } from '../src/index.js';
 
 const grammarsDir = resolve(import.meta.dirname, '..', 'grammars');
@@ -26,6 +28,31 @@ function dedent(str: string): string {
       return Math.min(min, indent);
     }, Infinity);
   return lines.map(l => l.slice(minIndent)).join('\n');
+}
+
+const BUILTIN_KEYS = new Set(['element', 'start', 'end', 'text', 'parent', 'children']);
+
+function serializeTree(node: SyntaxTreeNode): unknown {
+  const custom: Record<string, unknown> = {};
+  for (const key of Object.keys(node)) {
+    if (BUILTIN_KEYS.has(key)) continue;
+    const val = (node as any)[key];
+    if (typeof val === 'function') continue;
+    if (key === 'compiled') continue;
+    if (val === null || typeof val === 'string' || typeof val === 'number' || typeof val === 'boolean') {
+      custom[key] = val;
+    } else if (Array.isArray(val) && val.every(v => v === null || typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean')) {
+      custom[key] = val;
+    }
+  }
+  return {
+    name: node.element.name,
+    text: node.text,
+    start: node.start,
+    end: node.end,
+    ...custom,
+    children: node.children.map(serializeTree),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -67,6 +94,22 @@ describe('Bootstrap grammar', () => {
     expect(result.errors.length).toBe(0);
     expect((result.tree as any).value).toBe(8);
   });
+
+  it('bootstrap idempotence: round 2 and round 3 produce identical ASTs', async () => {
+    const grammarSource = readFileSync(resolve(grammarsDir, 'dsl-bootstrap.grammar'), 'utf-8');
+
+    // Round 1: parse grammar source with the full DSL grammar (standard bootstrap)
+    const bootstrap1 = await parseGrammarBootstrapped(grammarSource);
+
+    // Round 2: use bootstrap_1 to parse the grammar source again
+    const { grammar: bootstrap2, tree: tree2 } = await compileGrammarDSL(grammarSource, bootstrap1);
+
+    // Round 3: use bootstrap_2 to parse the grammar source again
+    const { tree: tree3 } = await compileGrammarDSL(grammarSource, bootstrap2);
+
+    // Serialize both trees and assert equality (idempotence / fixed point)
+    expect(serializeTree(tree3)).toEqual(serializeTree(tree2));
+  }, 30_000);
 });
 
 // ---------------------------------------------------------------------------
