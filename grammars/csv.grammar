@@ -1,0 +1,15 @@
+Newline /\r?\n/
+
+Document @target
+  Row (Newline Row)*
+    rows = [$(0).fields].concat($(1).children.filter(function(c) { return c.text.length > 0; }).map(function(c) { return c.children[1].fields; }))
+
+Row
+  Field (',' Field)*
+    fields = [$(0).value].concat($(1).children.filter(function(c) { return c.text.length > 0; }).map(function(c) { return c.children[1].value; }))
+
+Field
+  /"(?:[^"]|"")*"/
+    value = $(0).text.slice(1, -1).replace(/""/g, '"')
+  /[^,\n\r"]*/
+    value = $(0).text

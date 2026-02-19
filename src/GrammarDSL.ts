@@ -75,7 +75,7 @@ function lexLines(source: string): SourceLine[] {
   return result;
 }
 
-function stripComment(line: string): string {
+export function stripComment(line: string): string {
   let inSingle = false;
   let inDouble = false;
   let inRegex = false;
@@ -825,7 +825,7 @@ function resolveRef(grammar: Grammar, ref: DSLElementRef): GrammarElement {
   return element;
 }
 
-function compileEvaluate(
+export function compileEvaluate(
   expression: string,
   definitionsCode: string | null,
   lineNumber: number,

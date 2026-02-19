@@ -1,0 +1,507 @@
+@whitespace /[ \t]+/
+
+@definitions
+  class DSLError extends Error {
+    constructor(message, line, column = 1) {
+      super(`Line ${line}: ${message}`);
+      this.line = line;
+      this.column = column;
+    }
+  }
+  function repChildren(repNode) {
+    return repNode.children.filter(
+      (c) => c.element !== repNode.element || c.children.length > 0
+    );
+  }
+  function optText(optNode) {
+    return optNode.children.length > 0 ? optNode.children[0].text : null;
+  }
+  function extractStringValue(text) {
+    const inner = text.slice(1, -1);
+    let result = '';
+    for (let i = 0; i < inner.length; i++) {
+      if (inner[i] === '\\' && i + 1 < inner.length) {
+        i++;
+        result += inner[i];
+      } else {
+        result += inner[i];
+      }
+    }
+    return result;
+  }
+  function parseRegexList(value, line) {
+    const results = [];
+    const parts = value.split('|').map((s) => s.trim());
+    for (const part of parts) {
+      const m = part.match(/^\/(.+)\/([gimsuy]*)$/);
+      if (!m) throw new DSLError(`Invalid regex literal: ${part}`, line);
+      try {
+        results.push(new RegExp(m[1], m[2]));
+      } catch (e) {
+        throw new DSLError(`Invalid regex pattern: ${part} — ${e.message}`, line);
+      }
+    }
+    return results;
+  }
+  function transformExpression(expression) {
+    let transformed = expression.replace(/\$\((\d+)\)/g, 'node.children[$1]');
+    transformed = transformed.replace(/\$\.([a-zA-Z_][a-zA-Z0-9_]*)/g, 'node.$1');
+    return transformed;
+  }
+  function classifyEvalLine(node) {
+    const firstText = node.children[0].text;
+    if (firstText === 'if') return 'if';
+    if (firstText === 'for') return 'for';
+    if (firstText === 'while') return 'while';
+    if (node.children.length >= 3 && node.children[1].text === '=') return 'assignment';
+    return 'expression';
+  }
+  function extractEvalLines(firstNode, repNode) {
+    const lines = [firstNode];
+    for (const child of repChildren(repNode)) {
+      lines.push(child.children[1]);
+    }
+    return lines;
+  }
+  function compileEvalLineToJS(node) {
+    const kind = classifyEvalLine(node);
+    switch (kind) {
+      case 'assignment': {
+        const name = node.children[0].text;
+        const expr = node.children[2].text;
+        return `node.${name} = ${transformExpression(expr)};`;
+      }
+      case 'if': {
+        const condition = transformExpression(node.children[1].text);
+        const bodyLines = extractEvalLines(node.children[4], node.children[5]);
+        const bodyJS = bodyLines.map(compileEvalLineToJS).join('\n');
+        let result = `if (${condition}) {\n${bodyJS}\n}`;
+        const elseOpt = node.children[8];
+        if (elseOpt.children.length > 0) {
+          result += ' ' + compileEvalElseToJS(elseOpt.children[0]);
+        }
+        return result;
+      }
+      case 'for': {
+        const expr = transformExpression(node.children[1].text);
+        const bodyLines = extractEvalLines(node.children[4], node.children[5]);
+        const bodyJS = bodyLines.map(compileEvalLineToJS).join('\n');
+        return `for (${expr}) {\n${bodyJS}\n}`;
+      }
+      case 'while': {
+        const condition = transformExpression(node.children[1].text);
+        const bodyLines = extractEvalLines(node.children[4], node.children[5]);
+        const bodyJS = bodyLines.map(compileEvalLineToJS).join('\n');
+        return `while (${condition}) {\n${bodyJS}\n}`;
+      }
+      case 'expression': {
+        const expr = node.children[0].text;
+        return `${transformExpression(expr)};`;
+      }
+    }
+  }
+  function compileEvalElseToJS(node) {
+    if (node.children[0].text === 'else' && node.children[1].text === 'if') {
+      const condition = transformExpression(node.children[2].text);
+      const bodyLines = extractEvalLines(node.children[5], node.children[6]);
+      const bodyJS = bodyLines.map(compileEvalLineToJS).join('\n');
+      let result = `else if (${condition}) {\n${bodyJS}\n}`;
+      const elseOpt = node.children[9];
+      if (elseOpt.children.length > 0) {
+        result += ' ' + compileEvalElseToJS(elseOpt.children[0]);
+      }
+      return result;
+    } else {
+      const bodyLines = extractEvalLines(node.children[3], node.children[4]);
+      const bodyJS = bodyLines.map(compileEvalLineToJS).join('\n');
+      return `else {\n${bodyJS}\n}`;
+    }
+  }
+  function collectNestedAttrNames(node, names) {
+    const kind = classifyEvalLine(node);
+    if (kind === 'assignment') {
+      names.add(node.children[0].text);
+      return;
+    }
+    if (kind === 'if' || kind === 'for' || kind === 'while') {
+      const bodyLines = extractEvalLines(node.children[4], node.children[5]);
+      for (const line of bodyLines) {
+        collectNestedAttrNames(line, names);
+      }
+      if (kind === 'if') {
+        const elseOpt = node.children[8];
+        if (elseOpt.children.length > 0) {
+          collectNestedAttrNamesFromElse(elseOpt.children[0], names);
+        }
+      }
+    }
+  }
+  function collectNestedAttrNamesFromElse(node, names) {
+    if (node.children[1].text === 'if') {
+      const bodyLines = extractEvalLines(node.children[5], node.children[6]);
+      for (const line of bodyLines) {
+        collectNestedAttrNames(line, names);
+      }
+      const elseOpt = node.children[9];
+      if (elseOpt.children.length > 0) {
+        collectNestedAttrNamesFromElse(elseOpt.children[0], names);
+      }
+    } else {
+      const bodyLines = extractEvalLines(node.children[3], node.children[4]);
+      for (const line of bodyLines) {
+        collectNestedAttrNames(line, names);
+      }
+    }
+  }
+  function collectEvalBlock(phrase, evalLineNodes, phraseIndex) {
+    const evaluateAttrs = [];
+    const finalizeStmts = [];
+    const nestedAttrNames = new Set();
+    for (const evalNode of evalLineNodes) {
+      const kind = classifyEvalLine(evalNode);
+      if (kind === 'assignment') {
+        evaluateAttrs.push({
+          name: evalNode.children[0].text,
+          expr: evalNode.children[2].text,
+          line: evalNode.start.line,
+        });
+      } else {
+        finalizeStmts.push(compileEvalLineToJS(evalNode));
+        if (kind === 'if' || kind === 'for' || kind === 'while') {
+          collectNestedAttrNames(evalNode, nestedAttrNames);
+        }
+      }
+    }
+    return {
+      phraseIndex,
+      phrase,
+      evaluateAttrs,
+      finalizeBody: finalizeStmts.length > 0 ? finalizeStmts.join('\n') : null,
+      nestedAttrNames,
+    };
+  }
+  function resolveAtomicRef(grammar, text, line) {
+    if (text.startsWith('/')) {
+      const m = text.match(/^\/(.+)\/([gimsuy]*)$/);
+      if (!m) throw new DSLError(`Invalid regex: ${text}`, line);
+      try {
+        return grammar.terminal(new RegExp(m[1], m[2]));
+      } catch (e) {
+        throw new DSLError(`Invalid regex: ${text} — ${e.message}`, line);
+      }
+    }
+    if (text.startsWith("'") || text.startsWith('"')) {
+      return grammar.resolve(extractStringValue(text));
+    }
+    switch (text) {
+      case 'EndOfFile': return SpecialTerminal.of('EndOfFile');
+      case 'Indent': return SpecialTerminal.of('Indent');
+      case 'Unindent': return SpecialTerminal.of('Unindent');
+      case 'EndOfLine': return SpecialTerminal.of('EndOfLine');
+      default:
+        try {
+          return grammar.get(text);
+        } catch {
+          throw new DSLError(`Undefined element: '${text}'`, line);
+        }
+    }
+  }
+  function parseBoundsNode(boundsNode, cb) {
+    if (boundsNode.children.length === 5) {
+      cb(parseInt(boundsNode.children[1].text, 10), parseInt(boundsNode.children[3].text, 10));
+    } else {
+      const n = parseInt(boundsNode.children[1].text, 10);
+      cb(n, n);
+    }
+  }
+  function processRepeatBlock(grammar, children, line) {
+    const innerElement = resolvePhraseElement(grammar, children[1]);
+    const suffixOpt = children[2];
+    const plusOpt = children[4];
+    let delimiter = null;
+    let min = 0;
+    let max = Infinity;
+    if (suffixOpt.children.length > 0) {
+      const suffix = suffixOpt.children[0];
+      if (suffix.children.length === 3) {
+        delimiter = extractStringValue(suffix.children[1].text);
+        const boundsOpt = suffix.children[2];
+        if (boundsOpt.children.length > 0) {
+          parseBoundsNode(boundsOpt.children[0], (lo, hi) => { min = lo; max = hi; });
+        }
+      } else {
+        parseBoundsNode(suffix.children[1], (lo, hi) => { min = lo; max = hi; });
+      }
+    }
+    if (plusOpt.children.length > 0) {
+      if (min === 0) min = 1;
+    }
+    const opts = { min, max };
+    if (delimiter != null) opts.delimiter = delimiter;
+    return grammar.repeat(innerElement, opts);
+  }
+  function processOptionalBlock(grammar, children) {
+    const innerRep = children[1];
+    const innerElements = innerRep.children.map((n) => resolvePhraseElement(grammar, n));
+    if (innerElements.length === 1) return grammar.optional(innerElements[0]);
+    return grammar.optional(grammar.phrase(innerElements));
+  }
+  function processGroup(grammar, children) {
+    const groupBody = children[1];
+    const groupAltRep = groupBody.children[0];
+    const alternatives = [];
+    for (const galt of groupAltRep.children) {
+      const peRep = galt.children[0];
+      alternatives.push(peRep.children.map((n) => resolvePhraseElement(grammar, n)));
+    }
+    let resolved;
+    if (alternatives.length === 1) {
+      const elems = alternatives[0];
+      resolved = elems.length === 1 ? elems[0] : grammar.phrase(elems);
+    } else {
+      resolved = grammar.disjunction(
+        alternatives.map((alt) => (alt.length === 1 ? alt[0] : grammar.phrase(alt)))
+      );
+    }
+    const modifier = optText(children[3]);
+    if (modifier === '*') return grammar.repeat(resolved, { min: 0 });
+    if (modifier === '+') return grammar.repeat(resolved, { min: 1 });
+    if (modifier === '?') return grammar.optional(resolved);
+    return resolved;
+  }
+  function resolvePhraseElement(grammar, node) {
+    const children = node.children;
+    const firstText = children[0].text;
+    if (firstText === '{') return processRepeatBlock(grammar, children, node.start.line);
+    if (firstText === '[') return processOptionalBlock(grammar, children);
+    if (firstText === '(') return processGroup(grammar, children);
+    const atomNode = children[0];
+    const atomText = atomNode.children.length > 0 ? atomNode.children[0].text : atomNode.text;
+    const modifier = optText(children[1]);
+    const element = resolveAtomicRef(grammar, atomText, node.start.line);
+    if (modifier === '?') return grammar.optional(element);
+    if (modifier === '*') return grammar.repeat(element, { min: 0 });
+    if (modifier === '+') return grammar.repeat(element, { min: 1 });
+    return element;
+  }
+  function resolveTarget(grammar, config, elementDefs) {
+    if (config.target) {
+      try {
+        grammar.target = grammar.get(config.target);
+      } catch {
+        throw new DSLError(`Target element '${config.target}' not found`, 0);
+      }
+      return;
+    }
+    for (const def of elementDefs) {
+      if (def.flags.includes('@target')) {
+        grammar.target = grammar.get(def.name);
+        return;
+      }
+    }
+    for (const def of elementDefs) {
+      if (def.kind === 'nonterminal') {
+        grammar.target = grammar.get(def.name);
+        return;
+      }
+    }
+  }
+  function compileGrammar(rootNode) {
+    const topItems = repChildren(rootNode.children[0]);
+    const config = { whitespace: [], comments: [], blockIndent: false, target: null };
+    const elementDefs = [];
+    let definitionsCode = null;
+    for (const item of topItems) {
+      const kind = item.kind;
+      if (kind === 'whitespace') {
+        config.whitespace = parseRegexList(item.value, item.start.line);
+      } else if (kind === 'comment') {
+        config.comments = parseRegexList(item.value, item.start.line);
+      } else if (kind === 'block-indent') {
+        config.blockIndent = true;
+      } else if (kind === 'import') {
+        throw new DSLError('@import is not yet supported', item.start.line);
+      } else if (kind === 'target') {
+        config.target = item.targetName;
+      } else if (kind === 'definitions') {
+        definitionsCode = item.code;
+      } else {
+        const elemKind = kind === 'regex-terminal' ? 'regex'
+          : kind === 'string-terminal' ? 'string' : 'nonterminal';
+        elementDefs.push({ name: item.elName, flags: item.flags, node: item, kind: elemKind, line: item.start.line });
+      }
+    }
+    const grammarOptions = {};
+    if (config.whitespace.length === 1) grammarOptions.whitespace = config.whitespace[0];
+    else if (config.whitespace.length > 1) grammarOptions.whitespace = config.whitespace;
+    if (config.comments.length === 1) grammarOptions.comments = config.comments[0];
+    else if (config.comments.length > 1) grammarOptions.comments = config.comments;
+    if (config.blockIndent) grammarOptions.blockIndent = true;
+    const grammar = new Grammar(grammarOptions);
+    for (const def of elementDefs) {
+      if (def.kind === 'regex') {
+        const regexText = def.node.patternText;
+        const m = regexText.match(/^\/(.+)\/([gimsuy]*)$/);
+        if (!m) throw new DSLError(`Invalid regex: ${regexText}`, def.line);
+        try {
+          grammar.terminal(new RegExp(m[1], m[2]), def.name);
+        } catch (e) {
+          throw new DSLError(`Invalid regex: ${regexText} — ${e.message}`, def.line);
+        }
+      } else if (def.kind === 'string') {
+        grammar.terminal(extractStringValue(def.node.patternText), def.name);
+      } else {
+        grammar.disjunction([], def.name);
+      }
+    }
+    let phraseIndex = 0;
+    const evalSpecs = [];
+    for (const def of elementDefs) {
+      if (def.kind !== 'nonterminal') continue;
+      const disjunction = grammar.get(def.name);
+      const phraseAlts = def.node.children[4].children;
+      for (const altNode of phraseAlts) {
+        const peRep = altNode.children[0];
+        const resolvedElements = peRep.children.map((n) => resolvePhraseElement(grammar, n));
+        const phrase = grammar.phrase(resolvedElements);
+        if (altNode.hasEval) {
+          const evalLineNodes = extractEvalLines(altNode.children[3], altNode.children[4]);
+          const spec = collectEvalBlock(phrase, evalLineNodes, phraseIndex);
+          evalSpecs.push(spec);
+          phraseIndex++;
+        }
+        disjunction.add(phrase);
+      }
+    }
+    resolveTarget(grammar, config, elementDefs);
+    return { grammar, evalSpecs, definitionsCode };
+  }
+
+EOL /\n/
+IND /\x01/
+DED /\x02/
+Identifier /[a-zA-Z_][a-zA-Z0-9_]*/
+RegexLiteral /\/(?:[^\/\\]|\\.)*\/[gimsuy]*/
+StringLiteral /'(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*"/
+AtFlag /@[a-zA-Z_-]+/
+Number /[0-9]+/
+RestOfLine /[^\n\x01\x02]+/
+
+GrammarDef @target
+  TopLevelItem*
+    $.compiled = compileGrammar(node)
+
+TopLevelItem
+  '@whitespace' RestOfLine EOL
+    kind = 'whitespace'
+    value = $(1).text.trim()
+  '@comment' RestOfLine EOL
+    kind = 'comment'
+    value = $(1).text.trim()
+  '@block-indent' EOL
+    kind = 'block-indent'
+  '@import' RestOfLine EOL
+    kind = 'import'
+    value = $(1).text.trim()
+  '@target' Identifier EOL
+    kind = 'target'
+    targetName = $(1).text.trim()
+  '@definitions' EOL IND RestOfLine (EOL RestOfLine)* EOL DED
+    kind = 'definitions'
+    code = [$(3).text].concat($(4).children.filter(c => c.text.length).map(c => c.children[1].text)).join('\n')
+  Identifier AtFlag* RegexLiteral EOL
+    kind = 'regex-terminal'
+    elName = $(0).text
+    patternText = $(2).text
+    flags = $(1).children.filter(c =>  c.text.length > 0).map(c =>  c.text)
+  Identifier AtFlag* StringLiteral EOL
+    kind = 'string-terminal'
+    elName = $(0).text
+    patternText = $(2).text
+    flags = $(1).children.filter(c =>  c.text.length > 0).map(c =>  c.text)
+  Identifier AtFlag* EOL IND PhraseAlt+ DED
+    kind = 'nonterminal'
+    elName = $(0).text
+    flags = $(1).children.filter(c =>  c.text.length > 0).map(c =>  c.text)
+
+PhraseAlt
+  PhraseElement+ EOL IND EvalLine (EOL EvalLine)* [EOL] DED
+    hasEval = true
+  PhraseElement+ EOL
+    hasEval = false
+
+EvalLine
+  Identifier '=' RestOfLine
+    evalKind = 'assignment'
+    attrName = $(0).text
+    attrExpr = $(2).text
+  'if' RestOfLine EOL IND EvalLine (EOL EvalLine)* [EOL] DED EvalElse?
+    evalKind = 'if'
+    condition = $(1).text
+  'for' RestOfLine EOL IND EvalLine (EOL EvalLine)* [EOL] DED
+    evalKind = 'for'
+    loopExpr = $(1).text
+  'while' RestOfLine EOL IND EvalLine (EOL EvalLine)* [EOL] DED
+    evalKind = 'while'
+    condition = $(1).text
+  RestOfLine
+    evalKind = 'expression'
+    exprText = $(0).text
+
+EvalElse
+  'else' 'if' RestOfLine EOL IND EvalLine (EOL EvalLine)* [EOL] DED EvalElse?
+    elseKind = 'elseif'
+    condition = $(2).text
+  'else' EOL IND EvalLine (EOL EvalLine)* [EOL] DED
+    elseKind = 'else'
+
+PhraseElement
+  Atom Modifier?
+    peKind = 'atom'
+    modifier = $(1).children.length > 0 ? $(1).children[0].text : null
+  '{' PhraseElement RepeatSuffix? '}' '+'?
+    peKind = 'repeat'
+    modifier = $(4).children.length > 0 ? '+' : null
+  '[' PhraseElement+ ']'
+    peKind = 'optional'
+  '(' GroupBody ')' Modifier?
+    peKind = 'group'
+    modifier = $(3).children.length > 0 ? $(3).children[0].text : null
+
+Atom
+  Identifier
+    atomKind = 'identifier'
+  StringLiteral
+    atomKind = 'string'
+  RegexLiteral
+    atomKind = 'regex'
+
+Modifier
+  '?'
+    modChar = '?'
+  '*'
+    modChar = '*'
+  '+'
+    modChar = '+'
+
+RepeatSuffix
+  '/' StringLiteral Bounds?
+    delimiterText = $(1).text
+    hasBounds = $(2).children.length > 0
+  '/' Bounds
+    delimiterText = null
+    hasBounds = true
+
+Bounds
+  '[' Number ',' Number ']'
+    minVal = parseInt($(1).text, 10)
+    maxVal = parseInt($(3).text, 10)
+  '[' Number ']'
+    minVal = parseInt($(1).text, 10)
+    maxVal = parseInt($(1).text, 10)
+
+GroupBody
+  { GroupAlt / '|' }+
+
+GroupAlt
+  PhraseElement+

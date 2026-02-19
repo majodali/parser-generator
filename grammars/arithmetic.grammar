@@ -1,0 +1,31 @@
+@whitespace /[ \t]+/
+
+Number /[0-9]+(\.[0-9]+)?/
+
+Expr @target
+  Expr '+' Term
+    value = $(0).value + $(2).value
+  Expr '-' Term
+    value = $(0).value - $(2).value
+  Term
+    value = $(0).value
+
+Term
+  Term '*' Factor
+    value = $(0).value * $(2).value
+  Term '/' Factor
+    value = $(0).value / $(2).value
+  Factor
+    value = $(0).value
+
+Factor
+  Atom '^' Factor
+    value = Math.pow($(0).value, $(2).value)
+  Atom
+    value = $(0).value
+
+Atom
+  Number
+    value = parseFloat($(0).text)
+  '(' Expr ')'
+    value = $(1).value

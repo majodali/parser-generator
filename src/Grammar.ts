@@ -15,9 +15,15 @@ export interface GrammarOptions {
   blockIndent?: boolean;
 }
 
+export interface OperatorPrecedenceLevel {
+  operators: GrammarElement[];
+  associativity: 'left' | 'right' | 'none';
+}
+
 export class Grammar {
   readonly options: GrammarOptions;
   target: GrammarElement | null = null;
+  readonly precedenceLevels: OperatorPrecedenceLevel[] = [];
   private readonly elements: GrammarElement[] = [];
   private readonly namedElements: Map<string, GrammarElement> = new Map();
   private readonly fixedStringTerminals: Map<string, Terminal> = new Map();
@@ -60,6 +66,13 @@ export class Grammar {
     const resolved = this.resolve(element);
     const o = new Optional(resolved);
     return this.register(o);
+  }
+
+  /** Declare operator precedence. Each call adds a level (first call = lowest precedence). */
+  precedence(operators: ElementReference[], associativity: 'left' | 'right' | 'none' = 'left'): this {
+    const resolved = operators.map(op => this.resolve(op));
+    this.precedenceLevels.push({ operators: resolved, associativity });
+    return this;
   }
 
   get(name: string): GrammarElement {

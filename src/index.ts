@@ -1,5 +1,5 @@
 export { Grammar } from './Grammar.js';
-export type { GrammarOptions } from './Grammar.js';
+export type { GrammarOptions, OperatorPrecedenceLevel } from './Grammar.js';
 
 export {
   GrammarElement,
@@ -26,5 +26,10 @@ export type {
 export { SyntaxTreeNode } from './SyntaxTreeNode.js';
 export type { TextLocation } from './SyntaxTreeNode.js';
 
-export { parseGrammar, DSLError } from './GrammarDSL.js';
+export { parseGrammar, DSLError, stripComment, compileEvaluate } from './GrammarDSL.js';
 export type { ParseGrammarOptions } from './GrammarDSL.js';
+
+export { parseGrammarBootstrapped, getDSLGrammarSource } from './GrammarDSLBootstrapped.js';
+
+export { parse } from './Parser.js';
+export type { ParseOptions, ParseError, ParseResult } from './Parser.js';
